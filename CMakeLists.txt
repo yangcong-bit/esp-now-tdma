@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS
+        "src/tdma_core.c"
+        "src/tdma_ringbuf.c"
+    INCLUDE_DIRS
+        "include"
+    PRIV_REQUIRES
+        esp_wifi
+        espressif__esp-now
+)
