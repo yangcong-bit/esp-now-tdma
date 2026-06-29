@@ -1,0 +1,2 @@
+dependencies:
+  yangcong-bit/esp-now-tdma: "^1.0.2"
