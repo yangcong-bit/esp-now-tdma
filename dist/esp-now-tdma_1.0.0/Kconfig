@@ -1,0 +1,51 @@
+menu "ESP TDMA MAC Configuration"
+
+    config TDMA_MAX_NODES
+        int "Maximum number of slave nodes"
+        range 1 15
+        default 15
+        help
+            Maximum number of slave nodes the master can track simultaneously.
+
+    config TDMA_BEACON_INTERVAL_MS
+        int "Beacon broadcast interval (ms)"
+        range 5 100
+        default 10
+        help
+            How often the master broadcasts the TDMA beacon. All node slot
+            offsets must be smaller than this value in microseconds.
+
+    config TDMA_SLOT_STEP_US
+        int "Time slot step per node (microseconds)"
+        range 100 5000
+        default 700
+        help
+            Each node fires its transmission this many microseconds after the
+            previous one. Node N fires at N * SLOT_STEP_US after the beacon.
+            Ensure: MAX_NODES * SLOT_STEP_US < BEACON_INTERVAL_MS * 1000.
+
+    config TDMA_PER_WINDOW_SIZE
+        int "PER sliding window size (packets)"
+        range 100 2000
+        default 1000
+        help
+            Number of packets in the sliding window used to compute the
+            Packet Error Rate (PER) for Adaptive Frequency Hopping (AFH).
+
+    config TDMA_PER_THRESHOLD_PCT
+        int "PER threshold to trigger AFH (%)"
+        range 1 20
+        default 5
+        help
+            If the PER exceeds this percentage, the master triggers a channel
+            hop (cycles: 1 -> 6 -> 11 -> 1).
+
+    config TDMA_PAYLOAD_SIZE
+        int "Maximum user payload size per packet (bytes)"
+        range 8 242
+        default 220
+        help
+            Maximum bytes the user can enqueue per transmission slot.
+            Must not exceed 242 (250-byte ESP-NOW MTU minus 8-byte header).
+
+endmenu

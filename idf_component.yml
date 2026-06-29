@@ -1,5 +1,5 @@
 cmake_minimum_required_version: "3.16"
-version: "1.0.0"
+version: "1.0.1"
 description: >-
   A TDMA MAC layer for ESP-NOW on ESP32-S3 with Adaptive Frequency Hopping (AFH).
   Provides deterministic time-slotted access, NFC OOB provisioning support, and

@@ -21,9 +21,6 @@ static const char *TAG = "esp_tdma_mac";
 static esp_tdma_state_t s_master_state = TDMA_STATE_IDLE;
 static esp_tdma_state_t s_slave_state  = TDMA_STATE_IDLE;
 
-// --- Role flag: set to true only when esp_tdma_master_init is called ---
-static bool s_role_is_master = false;
-
 // --- Forward Declarations ---
 static void master_handle_rx(const uint8_t *src_mac, const uint8_t *data, int len);
 static void slave_handle_rx(const uint8_t *src_mac, const uint8_t *data, int len);
@@ -95,23 +92,14 @@ void esp_tdma_master_register_node(uint8_t node_id, const uint8_t *mac_addr,
     s_node_registry[idx].fw_needs_upgrade = needs_upgrade;
     memcpy(s_node_registry[idx].mac_addr, mac_addr, 6);
 
-    esp_now_peer_info_t peer = {0};
-    memcpy(peer.peer_addr, mac_addr, 6);
-    peer.channel = 0;
-    peer.ifidx   = WIFI_IF_STA;
-    peer.encrypt = (aes_lmk != NULL);
-    if (aes_lmk) memcpy(peer.lmk, aes_lmk, 16);
-
-    if (esp_now_is_peer_exist(mac_addr)) {
-        esp_err_t mod_err = esp_now_mod_peer(&peer);
-        ESP_LOGW(TAG, "Master: modified peer %02x:%02x:%02x:%02x:%02x:%02x encrypt=%d lmk=%s err=%s",
-                 mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5],
-                 peer.encrypt, aes_lmk ? "SET" : "NULL", esp_err_to_name(mod_err));
-    } else {
-        esp_err_t add_err = esp_now_add_peer(&peer);
-        ESP_LOGW(TAG, "Master: added peer %02x:%02x:%02x:%02x:%02x:%02x encrypt=%d lmk=%s err=%s",
-                 mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5],
-                 peer.encrypt, aes_lmk ? "SET" : "NULL", esp_err_to_name(add_err));
+    if (!esp_now_is_peer_exist(mac_addr)) {
+        esp_now_peer_info_t peer = {0};
+        memcpy(peer.peer_addr, mac_addr, 6);
+        peer.channel = 0;
+        peer.ifidx   = WIFI_IF_STA;
+        peer.encrypt = (aes_lmk != NULL);
+        if (aes_lmk) memcpy(peer.lmk, aes_lmk, 16);
+        esp_now_add_peer(&peer);
     }
 }
 
@@ -172,15 +160,6 @@ static void master_beacon_timer_cb(void *arg) {
 static void master_handle_rx(const uint8_t *src_mac, const uint8_t *data, int len) {
     if (len < 1) return;
     uint8_t pkt_type = data[0];
-
-    /* 诊断日志: 记录所有到达 Master 的包（含类型和源MAC） */
-    static uint32_t s_master_rx_count = 0;
-    s_master_rx_count++;
-    if (s_master_rx_count <= 20 || s_master_rx_count % 1000 == 0) {
-        ESP_LOGW(TAG, "Master RX #%lu: type=0x%02X len=%d src=%02x:%02x:%02x:%02x:%02x:%02x",
-                 (unsigned long)s_master_rx_count, pkt_type, len,
-                 src_mac[0], src_mac[1], src_mac[2], src_mac[3], src_mac[4], src_mac[5]);
-    }
 
     if (pkt_type == TDMA_PKT_DATA && len >= (int)(sizeof(tdma_data_pkt_t) - CONFIG_TDMA_PAYLOAD_SIZE)) {
         int64_t rx_us = esp_timer_get_time();
@@ -283,7 +262,7 @@ static void master_handle_rx(const uint8_t *src_mac, const uint8_t *data, int le
                     wifi_second_chan_t second;
                     esp_wifi_get_channel(&cur_chan, &second);
                     uint8_t tgt = (cur_chan == 1) ? 6 : (cur_chan == 6) ? 11 : 1;
-                    ESP_LOGW(TAG, "Node %d PER %.2f%% > %d%% on ch%d — hopping to ch%d",
+                    ESP_LOGW(TAG, "Node %d PER %.2f%% > %d%% on ch%d �� hopping to ch%d",
                              node_id, per * 100.0f, CONFIG_TDMA_PER_THRESHOLD_PCT,
                              cur_chan, tgt);
                     esp_tdma_master_trigger_afh(tgt);
@@ -311,10 +290,6 @@ static void master_handle_rx(const uint8_t *src_mac, const uint8_t *data, int le
         if (nid > 0 && nid <= MAX_NODES) {
             s_node_registry[nid - 1].is_registered  = true;
             s_node_registry[nid - 1].current_fw_ver = fw;
-
-            /* ? 关键修复: 直接从 REG_ACK 中提取 aes_lmk 注册加密 peer
-             * 确保 Master 对该 Node 的后续 DATA 包能正确解密 */
-            esp_tdma_master_register_node(nid, src_mac, ack->aes_lmk, fw, needs_up);
         }
         if (s_master_cfg.on_node_registered) {
             s_master_cfg.on_node_registered(nid, fw, needs_up);
@@ -328,7 +303,7 @@ static void master_handle_rx(const uint8_t *src_mac, const uint8_t *data, int le
             }
             if (count >= s_master_cfg.target_node_count) {
                 esp_tdma_master_set_state(TDMA_STATE_RUNNING);
-                ESP_LOGI(TAG, "All %d node(s) registered — entering RUNNING state", count);
+                ESP_LOGI(TAG, "All %d node(s) registered �� entering RUNNING state", count);
             }
         }
     }
@@ -337,59 +312,17 @@ static void master_handle_rx(const uint8_t *src_mac, const uint8_t *data, int le
 // Unified ESP-NOW receive callback
 static void espnow_recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
     if (!info || !data || len <= 0) return;
-    if (s_role_is_master) {
+    if (s_master_state != TDMA_STATE_IDLE) {
         master_handle_rx(info->src_addr, data, len);
     } else {
         slave_handle_rx(info->src_addr, data, len);
     }
 }
 
-static esp_err_t init_wifi_and_espnow(bool is_master) {
-    wifi_mode_t mode;
-    esp_err_t wifi_err = esp_wifi_get_mode(&mode);
-    if (wifi_err == ESP_ERR_WIFI_NOT_INIT) {
-        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-        esp_err_t err = esp_wifi_init(&cfg);
-        if (err != ESP_OK) return err;
-        err = esp_wifi_set_mode(WIFI_MODE_STA);
-        if (err != ESP_OK) return err;
-        err = esp_wifi_start();
-        if (err != ESP_OK) return err;
-        ESP_LOGI(TAG, "Wi-Fi initialized in STA mode by esp_tdma_mac component");
-    }
-
-    esp_err_t now_err = esp_now_init();
-    if (now_err == ESP_OK) {
-        ESP_LOGI(TAG, "ESP-NOW initialized by esp_tdma_mac component");
-    } else if (now_err == ESP_ERR_ESPNOW_INTERNAL) {
-        // Already initialized
-    } else {
-        return now_err;
-    }
-
-    if (is_master) {
-        esp_now_peer_info_t peer_info = {0};
-        uint8_t broadcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-        memcpy(peer_info.peer_addr, broadcast_mac, 6);
-        peer_info.channel = 0;
-        peer_info.ifidx = WIFI_IF_STA;
-        peer_info.encrypt = false;
-        esp_err_t err = esp_now_add_peer(&peer_info);
-        if (err != ESP_OK && err != ESP_ERR_ESPNOW_EXIST) {
-            return err;
-        }
-    }
-    return ESP_OK;
-}
-
 esp_err_t esp_tdma_master_init(const esp_tdma_master_cfg_t *cfg) {
     if (!cfg) return ESP_ERR_INVALID_ARG;
     s_master_cfg = *cfg;
-    s_role_is_master = true;  // Mark this node as master BEFORE calling init
     esp_tdma_master_set_state(TDMA_STATE_REGISTERING);
-
-    esp_err_t err = init_wifi_and_espnow(true);
-    if (err != ESP_OK) return err;
 
     esp_now_register_recv_cb(espnow_recv_cb);
 
@@ -426,8 +359,6 @@ static uint32_t s_slave_reg_ack_count   = 0;
 static uint8_t  s_slave_reg_ack_buf[sizeof(tdma_reg_ack_t)] = {0};
 
 static uint32_t s_slave_send_ok_count = 0;
-static uint32_t s_slave_reg_ack_send_ok = 0;
-static uint32_t s_slave_reg_ack_send_fail = 0;
 
 static volatile uint8_t s_slave_afh_local_countdown = 0;
 static uint8_t          s_slave_afh_next_channel     = 0;
@@ -466,7 +397,7 @@ void esp_tdma_slave_set_config(uint8_t node_id, const uint8_t *gateway_mac,
     memcpy(peer.lmk, aes_lmk, 16);
     esp_now_add_peer(&peer);
 
-    // Build REG_ACK (携带 aes_lmk 以便 Master 直接注册加密 peer)
+    // Build REG_ACK
     tdma_reg_ack_t ack = {
         .type            = TDMA_PKT_REG_ACK,
         .node_id         = node_id,
@@ -474,7 +405,6 @@ void esp_tdma_slave_set_config(uint8_t node_id, const uint8_t *gateway_mac,
     };
     uint32_t fw_ver = 20260622;
     memcpy(&ack.current_fw_ver, &fw_ver, sizeof(fw_ver));
-    memcpy(ack.aes_lmk, aes_lmk, 16);
     memcpy(s_slave_reg_ack_buf, &ack, sizeof(ack));
 
     s_slave_reg_ack_pending = true;
@@ -507,7 +437,7 @@ static void trigger_my_slot(void) {
 
 __attribute__((weak)) uint8_t battery_get_percentage(void) { return 100; }
 
-// Slave TX task — sends one payload per beacon slot
+// Slave TX task �� sends one payload per beacon slot
 static void tx_task(void *arg) {
     ESP_LOGI(TAG, "Slave TX task started");
     while (1) {
@@ -515,18 +445,11 @@ static void tx_task(void *arg) {
 
         uint32_t current_seq = s_slave_packet_seq++;
         esp_tdma_state_t state = s_slave_state;
-        static uint32_t s_rb_empty_count = 0;
-        static uint32_t s_send_fail_count = 0;
 
         if (current_seq % 100 == 1) {
-            ESP_LOGW(TAG, "TX Task SLOT REACHED! Seq: %lu, State: %d, Offset: %lu | rb_empty=%lu send_fail=%lu send_ok=%lu reg_ack_ok=%lu reg_ack_fail=%lu",
+            ESP_LOGW(TAG, "TX Task SLOT REACHED! Seq: %lu, State: %d, Offset: %lu",
                      (unsigned long)current_seq, (int)state,
-                     (unsigned long)s_slave_slot_offset_us,
-                     (unsigned long)s_rb_empty_count,
-                     (unsigned long)s_send_fail_count,
-                     (unsigned long)s_slave_send_ok_count,
-                     (unsigned long)s_slave_reg_ack_send_ok,
-                     (unsigned long)s_slave_reg_ack_send_fail);
+                     (unsigned long)s_slave_slot_offset_us);
         }
 
         if (state == TDMA_STATE_REGISTERING && s_slave_reg_ack_pending) {
@@ -534,42 +457,16 @@ static void tx_task(void *arg) {
                                          s_slave_reg_ack_buf,
                                          sizeof(tdma_reg_ack_t));
             if (err == ESP_OK) {
-                s_slave_reg_ack_send_ok++;
                 s_slave_reg_ack_count++;
                 if (s_slave_reg_ack_count >= 5) s_slave_reg_ack_pending = false;
-            } else {
-                s_slave_reg_ack_send_fail++;
-                ESP_LOGE(TAG, "REG_ACK send FAILED: %s [gw=%02x:%02x:%02x:%02x:%02x:%02x]",
-                         esp_err_to_name(err),
-                         s_slave_gateway_mac[0], s_slave_gateway_mac[1], s_slave_gateway_mac[2],
-                         s_slave_gateway_mac[3], s_slave_gateway_mac[4], s_slave_gateway_mac[5]);
             }
             continue;
         }
 
         if (state != TDMA_STATE_RUNNING) continue;
 
-        /* 丢弃积压的陈旧数据，保证发送的永远是最新的一帧（零延迟策略）
-         * IMU 采样率(~1000Hz)略高于 TDMA 发送率(100Hz)，若不清理，缓冲区会持续堆积。
-         * 策略：只保留最新的 1 条，丢弃所有更旧的帧。 */
-        {
-            uint32_t pending = tdma_ringbuf_count(&s_slave_rb);
-            if (pending > 1) {
-                tdma_payload_t drop_buf;
-                uint32_t to_drop = pending - 1;
-                for (uint32_t d = 0; d < to_drop; d++) {
-                    tdma_ringbuf_pop(&s_slave_rb, &drop_buf);
-                }
-                ESP_LOGD(TAG, "Backlog: dropped %lu stale frame(s), keeping newest",
-                         (unsigned long)to_drop);
-            }
-        }
-
         tdma_payload_t slot_data;
-        if (tdma_ringbuf_pop(&s_slave_rb, &slot_data) == 0) {
-            s_rb_empty_count++;
-            continue;
-        }
+        if (tdma_ringbuf_pop(&s_slave_rb, &slot_data) == 0) continue;
 
         tdma_data_pkt_t pkt = {0};
         pkt.type        = TDMA_PKT_DATA;
@@ -584,46 +481,16 @@ static void tx_task(void *arg) {
         esp_err_t err = esp_now_send(s_slave_gateway_mac,
                                      (uint8_t *)&pkt,
                                      offsetof(tdma_data_pkt_t, payload) + slot_data.len);
-        if (err == ESP_OK) {
-            s_slave_send_ok_count++;
-        } else {
-            s_send_fail_count++;
-            if (s_send_fail_count <= 5 || s_send_fail_count % 100 == 0) {
-                ESP_LOGE(TAG, "esp_now_send FAILED (seq=%lu): %s [gw=%02x:%02x:%02x:%02x:%02x:%02x]",
-                         (unsigned long)current_seq, esp_err_to_name(err),
-                         s_slave_gateway_mac[0], s_slave_gateway_mac[1], s_slave_gateway_mac[2],
-                         s_slave_gateway_mac[3], s_slave_gateway_mac[4], s_slave_gateway_mac[5]);
-            }
-        }
+        if (err == ESP_OK) s_slave_send_ok_count++;
     }
 }
 
-// Slave RX handler — processes beacons from master
+// Slave RX handler �� processes beacons from master
 static void slave_handle_rx(const uint8_t *src_mac, const uint8_t *data, int len) {
     if (len < 1 || data[0] != TDMA_PKT_BEACON) return;
     if (len != sizeof(tdma_beacon_t)) return;
 
     const tdma_beacon_t *beacon = (const tdma_beacon_t *)data;
-
-    static uint32_t s_beacon_rx_count = 0;
-    s_beacon_rx_count++;
-    if (s_beacon_rx_count <= 3 || s_beacon_rx_count % 500 == 0) {
-        ESP_LOGW(TAG, "Beacon RX #%lu: sys_state=%d slave_state=%d",
-                 (unsigned long)s_beacon_rx_count,
-                 (int)beacon->sys_state, (int)s_slave_state);
-    }
-
-    // Transition slave state based on beacon sys_state
-    if (s_slave_state == TDMA_STATE_REGISTERING && beacon->sys_state == TDMA_STATE_RUNNING) {
-        esp_tdma_slave_set_state(TDMA_STATE_RUNNING);
-        ESP_LOGW(TAG, "Slave: state transitioned to RUNNING based on Beacon");
-    } else if (s_slave_state == TDMA_STATE_RUNNING && beacon->sys_state == TDMA_STATE_REGISTERING) {
-        esp_tdma_slave_set_state(TDMA_STATE_REGISTERING);
-        ESP_LOGW(TAG, "Slave: state transitioned back to REGISTERING based on Beacon");
-    } else if (beacon->sys_state == TDMA_STATE_OTA && s_slave_state != TDMA_STATE_OTA) {
-        esp_tdma_slave_set_state(TDMA_STATE_OTA);
-        ESP_LOGW(TAG, "Slave: state transitioned to OTA based on Beacon");
-    }
 
     // Channel-hop flywheel
     if (beacon->next_channel != 0 && beacon->switch_countdown > 0) {
@@ -646,16 +513,13 @@ esp_err_t esp_tdma_slave_init(const esp_tdma_slave_cfg_t *cfg) {
     if (!cfg) return ESP_ERR_INVALID_ARG;
     s_slave_cfg = *cfg;
 
-    esp_err_t err = init_wifi_and_espnow(false);
-    if (err != ESP_OK) return err;
-
     tdma_ringbuf_init(&s_slave_rb, 64);
 
     esp_timer_create_args_t slot_args = {
         .callback  = on_slot_timer_tick,
         .name      = "tdma_slot"
     };
-    err = esp_timer_create(&slot_args, &s_slave_slot_timer);
+    esp_err_t err = esp_timer_create(&slot_args, &s_slave_slot_timer);
     if (err != ESP_OK) return err;
 
     xTaskCreatePinnedToCore(tx_task, "tdma_tx", 4096, NULL, 5,

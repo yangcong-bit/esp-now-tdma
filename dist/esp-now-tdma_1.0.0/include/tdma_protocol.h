@@ -82,7 +82,6 @@ typedef struct __attribute__((packed)) {
     uint8_t  node_id;          /**< Node ID confirming registration. */
     uint32_t current_fw_ver;   /**< Node's current firmware version. */
     bool     fw_needs_upgrade; /**< True if current_fw_ver < target_fw_ver. */
-    uint8_t  aes_lmk[16];     /**< AES-128 LMK for ESP-NOW encryption (´ÓNFC OOB»ñÈ¡). */
 } tdma_reg_ack_t;
 
 // ---------------------------------------------------------------------------
