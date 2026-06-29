@@ -28,17 +28,36 @@ extern "C" {
 #endif
 
 // ============================================================================
-// State machine
+// State machine (Legacy & New)
 // ============================================================================
 
-/** TDMA engine states, shared by both master and slave sides. */
+/** Legacy TDMA engine states, shared by both master and slave sides. */
 typedef enum {
     TDMA_STATE_IDLE,          /**< Not yet started. */
     TDMA_STATE_REGISTERING,   /**< Slave: waiting for master to acknowledge join. */
     TDMA_STATE_RUNNING,       /**< Normal operation. */
-    TDMA_STATE_SILENT_ERROR,  /**< Fatal error ¡ª no recovery without reboot. */
+    TDMA_STATE_SILENT_ERROR,  /**< Fatal error â€” no recovery without reboot. */
     TDMA_STATE_OTA,           /**< OTA firmware update in progress. */
 } esp_tdma_state_t;
+
+/** New decoupled Link status states. */
+typedef enum {
+    ESP_TDMA_LINK_OFFLINE = 0,      /**< Synced beacon lost or searching for gateway. */
+    ESP_TDMA_LINK_REGISTERING = 1,  /**< Node is registered or handshaking with gateway. */
+    ESP_TDMA_LINK_CONNECTED = 2,    /**< Link established and slots are active. */
+} esp_tdma_link_state_t;
+
+/** New selectable SPSC queueing policies. */
+typedef enum {
+    ESP_TDMA_QUEUE_FIFO = 0,            /**< Standard First-In-First-Out. Fails/blocks if queue is full. */
+    ESP_TDMA_QUEUE_DISCARD_STALE = 1,   /**< Discard older backlog frames on overflow, keeping only the newest frame. */
+} esp_tdma_queue_policy_t;
+
+/** Link state change callback. */
+typedef void (*esp_tdma_link_state_cb_t)(esp_tdma_link_state_t new_state);
+
+/** System state broadcast callback (for application-level states like OTA, RUNNING, etc.). */
+typedef void (*esp_tdma_sys_state_cb_t)(uint8_t sys_state);
 
 // ============================================================================
 // Master (gateway) API
@@ -53,46 +72,39 @@ typedef struct {
 
     /**
      * @brief Called on every received data packet from any slave.
-     *
-     * @param node_id     Node that sent the packet (1-based).
-     * @param seq         Packet sequence number.
-     * @param battery     Node battery percentage (0-100).
-     * @param payload     Pointer to the raw user payload bytes.
-     * @param payload_len Number of valid bytes in payload.
-     *
-     * @note This callback is invoked from the ESP-NOW RX callback context
-     *       (a high-priority Wi-Fi task). Keep it short; defer heavy work.
      */
     void (*on_data_received)(uint8_t node_id, uint32_t seq, uint8_t battery,
                              const void *payload, uint8_t payload_len);
 
     /**
      * @brief Called when a slave successfully completes the join handshake.
-     *
-     * @param node_id          Registered node ID.
-     * @param fw_ver           Slave's current firmware version.
-     * @param upgrade_required True if slave firmware is older than required.
      */
     void (*on_node_registered)(uint8_t node_id, uint32_t fw_ver, bool upgrade_required);
 
     /**
-     * @brief Called whenever the master engine changes state.
-     *
-     * @param new_state The new TDMA state.
+     * @brief Legacy state changed callback (kept for backward compatibility).
      */
     void (*on_state_changed)(esp_tdma_state_t new_state);
+
+    /**
+     * @brief Decoupled system state change callback (triggered by system broadcasts).
+     */
+    esp_tdma_sys_state_cb_t on_sys_state_changed;
+
+    /**
+     * @brief If true, the component will skip initializing Wi-Fi and ESP-NOW.
+     *        Use this if the application initializes Wi-Fi/ESP-NOW manually.
+     */
+    bool skip_wifi_init;
 } esp_tdma_master_cfg_t;
 
 /**
  * @brief Initialise the TDMA master engine.
- * @param cfg  Non-NULL pointer to master configuration.
- * @return ESP_OK on success.
  */
 esp_err_t esp_tdma_master_init(const esp_tdma_master_cfg_t *cfg);
 
 /**
  * @brief Start beacon broadcasting and begin accepting slave registrations.
- * @return ESP_OK on success.
  */
 esp_err_t esp_tdma_master_start(void);
 
@@ -105,7 +117,6 @@ void esp_tdma_master_register_node(uint8_t node_id, const uint8_t *mac_addr,
 
 /**
  * @brief Immediately schedule an Adaptive Frequency Hop to target_channel.
- * @param target_channel  Wi-Fi channel (1, 6, or 11 recommended).
  */
 void esp_tdma_master_trigger_afh(uint8_t target_channel);
 
@@ -124,48 +135,60 @@ void esp_tdma_master_set_state(esp_tdma_state_t state);
  */
 typedef struct {
     /**
-     * @brief Called whenever the slave engine changes state.
-     * @param new_state The new TDMA state.
+     * @brief Legacy state changed callback (kept for backward compatibility).
      */
     void (*on_state_changed)(esp_tdma_state_t new_state);
+
+    /**
+     * @brief New link sync state change callback.
+     */
+    esp_tdma_link_state_cb_t on_link_state_changed;
+
+    /**
+     * @brief Decoupled system state change callback (notified when master broadcasts a new state).
+     */
+    esp_tdma_sys_state_cb_t on_sys_state_changed;
+
+    /**
+     * @brief If true, the component will skip initializing Wi-Fi and ESP-NOW.
+     *        Use this if the application initializes Wi-Fi/ESP-NOW manually.
+     */
+    bool skip_wifi_init;
 } esp_tdma_slave_cfg_t;
 
 /**
  * @brief Initialise the TDMA slave engine.
- * @param cfg  Non-NULL pointer to slave configuration.
- * @return ESP_OK on success.
  */
 esp_err_t esp_tdma_slave_init(const esp_tdma_slave_cfg_t *cfg);
 
 /**
  * @brief Start listening for beacons and begin the join handshake.
- * @return ESP_OK on success.
  */
 esp_err_t esp_tdma_slave_start(void);
 
 /**
  * @brief Apply NFC-provisioned parameters and begin registration.
- *
- * @param node_id        Assigned node ID.
- * @param gateway_mac    Gateway ESP-NOW MAC (6 bytes).
- * @param aes_lmk        AES-128 Local Master Key (16 bytes).
- * @param slot_offset_us TX slot offset within the beacon period (?s).
  */
 void esp_tdma_slave_set_config(uint8_t node_id, const uint8_t *gateway_mac,
                                const uint8_t *aes_lmk, uint32_t slot_offset_us);
 
 /**
- * @brief Enqueue a user payload for transmission in the next TDMA slot.
+ * @brief Enqueue a user payload for transmission in the next TDMA slot (legacy API).
+ *
+ * Internally maps to esp_tdma_slave_enqueue_with_policy() using ESP_TDMA_QUEUE_DISCARD_STALE.
+ */
+esp_err_t esp_tdma_slave_enqueue(const void *data, size_t len);
+
+/**
+ * @brief Enqueue a user payload with a configurable queuing policy.
  *
  * Thread-safe (lock-free SPSC ring buffer). May be called from any task.
  *
- * @param data Pointer to the payload buffer.
- * @param len  Number of bytes to send. Must be <= CONFIG_TDMA_PAYLOAD_SIZE.
- * @return ESP_OK if enqueued, ESP_FAIL if the ring buffer is full,
- *         ESP_ERR_INVALID_ARG if len > CONFIG_TDMA_PAYLOAD_SIZE,
- *         ESP_ERR_INVALID_STATE if the slave is not in TDMA_STATE_RUNNING.
+ * @param data   Pointer to the payload buffer.
+ * @param len    Number of bytes to send. Must be <= CONFIG_TDMA_PAYLOAD_SIZE.
+ * @param policy Queuing policy (FIFO or DISCARD_STALE).
  */
-esp_err_t esp_tdma_slave_enqueue(const void *data, size_t len);
+esp_err_t esp_tdma_slave_enqueue_with_policy(const void *data, size_t len, esp_tdma_queue_policy_t policy);
 
 /** @brief Return current slave state. */
 esp_tdma_state_t esp_tdma_slave_get_state(void);
@@ -178,7 +201,7 @@ uint32_t esp_tdma_slave_get_send_ok(void);
 uint32_t esp_tdma_slave_get_queue_count(void);
 
 // ============================================================================
-// Internal ring buffer (exposed for advanced users; normally not needed)
+// Internal ring buffer
 // ============================================================================
 
 /** One entry in the TDMA payload ring buffer. */

@@ -1,5 +1,13 @@
 # Changelog / 更新日志
 
+## 1.0.7
+- **Architecture Decoupling (架构解耦与重构)**:
+  - Decoupled Wi-Fi & ESP-NOW auto-initialization. Added `.skip_wifi_init` configurations and `ESP_TDMA_AUTO_INIT_WIFI` Kconfig option. *(解耦 Wi-Fi 与 ESP-NOW 自动初始化，增加 `.skip_wifi_init` 配置以及相应的 Kconfig 选项。)*
+  - Decoupled data queue policies. Added selectable FIFO or DISCARD_STALE policies to allow custom application queueing logic. *(解耦数据排队策略，支持在入队时传入 FIFO 或零延迟覆盖（DISCARD_STALE）模式。)*
+  - Decoupled application business states. Removed OTA state from the core sync state machine; replaced with decoupled link state updates and generic system state notification events. *(解耦业务状态机，将 OTA 从链路同步状态机中剥离，仅通过回调回调通知高级系统状态更新。)*
+- **Bilingual Documentation (中英双语自述)**: Synchronized examples and changelog in both English and Chinese. *(全面同步了示例说明和更新日志的双语支持。)*
+- **Backward Compatibility (向后兼容层)**: Fully preserved legacy structures, callbacks, and the original 2-argument enqueue function signature to guarantee zero disruption to existing projects. *(完全保留原状态回调和双参数入队函数，保障主项目编译零报错、稳定运行。)*
+
 ## 1.0.6
 - **Multilingual Support (多语言支持)**: Added `readme_zh.md` to support English/Chinese toggle on the registry page. *(新增 `readme_zh.md` 支持组件库网页端的英/中双语切换。)*
 - **Bilingual Updates (双语日志与代码注释)**: Added Chinese comments to example codes and translated changelog. *(为示例项目代码添加了中文注释，并翻译了更新日志。)*

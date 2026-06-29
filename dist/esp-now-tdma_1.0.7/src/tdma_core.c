@@ -82,6 +82,9 @@ void esp_tdma_master_set_state(esp_tdma_state_t state) {
     if (s_master_cfg.on_state_changed) {
         s_master_cfg.on_state_changed(state);
     }
+    if (s_master_cfg.on_sys_state_changed) {
+        s_master_cfg.on_sys_state_changed((uint8_t)state);
+    }
 }
 
 void esp_tdma_master_register_node(uint8_t node_id, const uint8_t *mac_addr,
@@ -312,8 +315,7 @@ static void master_handle_rx(const uint8_t *src_mac, const uint8_t *data, int le
             s_node_registry[nid - 1].is_registered  = true;
             s_node_registry[nid - 1].current_fw_ver = fw;
 
-            /* ? 关键修复: 直接从 REG_ACK 中提取 aes_lmk 注册加密 peer
-             * 确保 Master 对该 Node 的后续 DATA 包能正确解密 */
+            /* 直接从 REG_ACK 中提取 aes_lmk 注册加密 peer */
             esp_tdma_master_register_node(nid, src_mac, ack->aes_lmk, fw, needs_up);
         }
         if (s_master_cfg.on_node_registered) {
@@ -344,27 +346,35 @@ static void espnow_recv_cb(const esp_now_recv_info_t *info, const uint8_t *data,
     }
 }
 
-static esp_err_t init_wifi_and_espnow(bool is_master) {
-    wifi_mode_t mode;
-    esp_err_t wifi_err = esp_wifi_get_mode(&mode);
-    if (wifi_err == ESP_ERR_WIFI_NOT_INIT) {
-        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-        esp_err_t err = esp_wifi_init(&cfg);
-        if (err != ESP_OK) return err;
-        err = esp_wifi_set_mode(WIFI_MODE_STA);
-        if (err != ESP_OK) return err;
-        err = esp_wifi_start();
-        if (err != ESP_OK) return err;
-        ESP_LOGI(TAG, "Wi-Fi initialized in STA mode by esp_tdma_mac component");
-    }
+static esp_err_t init_wifi_and_espnow(bool is_master, bool skip_wifi_init) {
+#ifndef CONFIG_ESP_TDMA_AUTO_INIT_WIFI
+    skip_wifi_init = true;
+#endif
 
-    esp_err_t now_err = esp_now_init();
-    if (now_err == ESP_OK) {
-        ESP_LOGI(TAG, "ESP-NOW initialized by esp_tdma_mac component");
-    } else if (now_err == ESP_ERR_ESPNOW_INTERNAL) {
-        // Already initialized
+    if (skip_wifi_init) {
+        ESP_LOGI(TAG, "Wi-Fi & ESP-NOW auto-initialization skipped by configuration");
     } else {
-        return now_err;
+        wifi_mode_t mode;
+        esp_err_t wifi_err = esp_wifi_get_mode(&mode);
+        if (wifi_err == ESP_ERR_WIFI_NOT_INIT) {
+            wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+            esp_err_t err = esp_wifi_init(&cfg);
+            if (err != ESP_OK) return err;
+            err = esp_wifi_set_mode(WIFI_MODE_STA);
+            if (err != ESP_OK) return err;
+            err = esp_wifi_start();
+            if (err != ESP_OK) return err;
+            ESP_LOGI(TAG, "Wi-Fi initialized in STA mode by esp_tdma_mac component");
+        }
+
+        esp_err_t now_err = esp_now_init();
+        if (now_err == ESP_OK) {
+            ESP_LOGI(TAG, "ESP-NOW initialized by esp_tdma_mac component");
+        } else if (now_err == ESP_ERR_ESPNOW_INTERNAL) {
+            // Already initialized
+        } else {
+            return now_err;
+        }
     }
 
     if (is_master) {
@@ -385,10 +395,10 @@ static esp_err_t init_wifi_and_espnow(bool is_master) {
 esp_err_t esp_tdma_master_init(const esp_tdma_master_cfg_t *cfg) {
     if (!cfg) return ESP_ERR_INVALID_ARG;
     s_master_cfg = *cfg;
-    s_role_is_master = true;  // Mark this node as master BEFORE calling init
+    s_role_is_master = true;
     esp_tdma_master_set_state(TDMA_STATE_REGISTERING);
 
-    esp_err_t err = init_wifi_and_espnow(true);
+    esp_err_t err = init_wifi_and_espnow(true, cfg->skip_wifi_init);
     if (err != ESP_OK) return err;
 
     esp_now_register_recv_cb(espnow_recv_cb);
@@ -432,14 +442,37 @@ static uint32_t s_slave_reg_ack_send_fail = 0;
 static volatile uint8_t s_slave_afh_local_countdown = 0;
 static uint8_t          s_slave_afh_next_channel     = 0;
 
+// New decoupled link state variable
+static esp_tdma_link_state_t s_slave_link_state = ESP_TDMA_LINK_OFFLINE;
+// Queue policy configured at runtime
+static esp_tdma_queue_policy_t s_slave_queue_policy = ESP_TDMA_QUEUE_DISCARD_STALE;
+
 esp_tdma_state_t esp_tdma_slave_get_state(void) {
     return s_slave_state;
+}
+
+static void esp_tdma_slave_update_link_state(esp_tdma_link_state_t next_link_state) {
+    if (s_slave_link_state != next_link_state) {
+        s_slave_link_state = next_link_state;
+        if (s_slave_cfg.on_link_state_changed) {
+            s_slave_cfg.on_link_state_changed(next_link_state);
+        }
+    }
 }
 
 void esp_tdma_slave_set_state(esp_tdma_state_t state) {
     s_slave_state = state;
     if (s_slave_cfg.on_state_changed) {
         s_slave_cfg.on_state_changed(state);
+    }
+
+    // Sync legacy states with the new decoupled link sync state
+    if (state == TDMA_STATE_IDLE || state == TDMA_STATE_SILENT_ERROR) {
+        esp_tdma_slave_update_link_state(ESP_TDMA_LINK_OFFLINE);
+    } else if (state == TDMA_STATE_REGISTERING) {
+        esp_tdma_slave_update_link_state(ESP_TDMA_LINK_REGISTERING);
+    } else if (state == TDMA_STATE_RUNNING) {
+        esp_tdma_slave_update_link_state(ESP_TDMA_LINK_CONNECTED);
     }
 }
 
@@ -466,7 +499,7 @@ void esp_tdma_slave_set_config(uint8_t node_id, const uint8_t *gateway_mac,
     memcpy(peer.lmk, aes_lmk, 16);
     esp_now_add_peer(&peer);
 
-    // Build REG_ACK (携带 aes_lmk 以便 Master 直接注册加密 peer)
+    // Build REG_ACK
     tdma_reg_ack_t ack = {
         .type            = TDMA_PKT_REG_ACK,
         .node_id         = node_id,
@@ -485,9 +518,14 @@ void esp_tdma_slave_set_config(uint8_t node_id, const uint8_t *gateway_mac,
 }
 
 esp_err_t esp_tdma_slave_enqueue(const void *data, size_t len) {
+    return esp_tdma_slave_enqueue_with_policy(data, len, ESP_TDMA_QUEUE_DISCARD_STALE);
+}
+
+esp_err_t esp_tdma_slave_enqueue_with_policy(const void *data, size_t len, esp_tdma_queue_policy_t policy) {
     if (!data) return ESP_ERR_INVALID_ARG;
     if (len > CONFIG_TDMA_PAYLOAD_SIZE) return ESP_ERR_INVALID_ARG;
     if (s_slave_state != TDMA_STATE_RUNNING) return ESP_ERR_INVALID_STATE;
+    s_slave_queue_policy = policy;
     return tdma_ringbuf_push(&s_slave_rb, data, (uint8_t)len) ? ESP_OK : ESP_FAIL;
 }
 
@@ -549,10 +587,9 @@ static void tx_task(void *arg) {
 
         if (state != TDMA_STATE_RUNNING) continue;
 
-        /* 丢弃积压的陈旧数据，保证发送的永远是最新的一帧（零延迟策略）
-         * IMU 采样率(~1000Hz)略高于 TDMA 发送率(100Hz)，若不清理，缓冲区会持续堆积。
-         * 策略：只保留最新的 1 条，丢弃所有更旧的帧。 */
-        {
+        /* If policy is DISCARD_STALE, clean up backlog to guarantee zero accumulation latency.
+         * Otherwise (FIFO), do not clean up backlog. */
+        if (s_slave_queue_policy == ESP_TDMA_QUEUE_DISCARD_STALE) {
             uint32_t pending = tdma_ringbuf_count(&s_slave_rb);
             if (pending > 1) {
                 tdma_payload_t drop_buf;
@@ -613,6 +650,15 @@ static void slave_handle_rx(const uint8_t *src_mac, const uint8_t *data, int len
                  (int)beacon->sys_state, (int)s_slave_state);
     }
 
+    // Notify application of system state updates (OTA, RUNNING, etc.)
+    static uint8_t s_last_broadcasted_sys_state = 0xFF;
+    if (s_last_broadcasted_sys_state != beacon->sys_state) {
+        s_last_broadcasted_sys_state = beacon->sys_state;
+        if (s_slave_cfg.on_sys_state_changed) {
+            s_slave_cfg.on_sys_state_changed(beacon->sys_state);
+        }
+    }
+
     // Transition slave state based on beacon sys_state
     if (s_slave_state == TDMA_STATE_REGISTERING && beacon->sys_state == TDMA_STATE_RUNNING) {
         esp_tdma_slave_set_state(TDMA_STATE_RUNNING);
@@ -646,7 +692,7 @@ esp_err_t esp_tdma_slave_init(const esp_tdma_slave_cfg_t *cfg) {
     if (!cfg) return ESP_ERR_INVALID_ARG;
     s_slave_cfg = *cfg;
 
-    esp_err_t err = init_wifi_and_espnow(false);
+    esp_err_t err = init_wifi_and_espnow(false, cfg->skip_wifi_init);
     if (err != ESP_OK) return err;
 
     tdma_ringbuf_init(&s_slave_rb, 64);

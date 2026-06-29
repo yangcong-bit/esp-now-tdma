@@ -15,8 +15,8 @@ typedef struct {
 static void sensor_task(void *pvParameters) {
     dummy_sensor_data_t data = {1.0f, 2.0f, 3.0f};
     while (1) {
-        // Enqueue sensor data to TDMA ring buffer SPSC queue
-        esp_tdma_slave_enqueue(&data, sizeof(data));
+        // Enqueue sensor data to TDMA ring buffer with the zero-latency discard policy
+        esp_tdma_slave_enqueue_with_policy(&data, sizeof(data), ESP_TDMA_QUEUE_DISCARD_STALE);
         ESP_LOGI(TAG, "Enqueued dummy sensor data: x=%.2f, y=%.2f, z=%.2f", data.x, data.y, data.z);
         
         data.x += 0.1f;

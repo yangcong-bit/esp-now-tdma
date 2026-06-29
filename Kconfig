@@ -48,4 +48,13 @@ menu "ESP TDMA MAC Configuration"
             Maximum bytes the user can enqueue per transmission slot.
             Must not exceed 242 (250-byte ESP-NOW MTU minus 8-byte header).
 
+    config ESP_TDMA_AUTO_INIT_WIFI
+        bool "Automatic Wi-Fi & ESP-NOW initialization"
+        default y
+        help
+            If enabled, the component will automatically initialize Wi-Fi in STA mode
+            and set up ESP-NOW during startup. Disable this if your application
+            manages Wi-Fi and ESP-NOW initialization manually.
+
 endmenu
+
